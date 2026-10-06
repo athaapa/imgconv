@@ -1,3 +1,4 @@
+#include <chrono>
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
@@ -6,16 +7,22 @@
 #include "stb_image_write.h"
 
 #include <cstdint>
+#include <functional>
 #include <iostream>
+#include <optional>
 #include <vector>
 
-std::vector<std::vector<std::uint8_t>> apply_kernel(
-    std::vector<std::vector<std::uint8_t>>& image, std::vector<std::vector<float>>& kernel) {
+constexpr int kIterations = 100;
+constexpr int kWarmupIterations = 5;
+
+using ApplyKernelFunction = std::function<void(std::vector<std::vector<std::uint8_t>>&,
+    std::vector<std::vector<float>>&, std::vector<std::vector<std::uint8_t>>&)>;
+
+__attribute__((noinline)) void apply_kernel_v0(std::vector<std::vector<std::uint8_t>>& image,
+    std::vector<std::vector<float>>& kernel, std::vector<std::vector<std::uint8_t>>& output) {
     size_t width = image[0].size();
     size_t height = image.size();
     size_t k = kernel.size();
-
-    std::vector<std::vector<std::uint8_t>> output(width, std::vector<std::uint8_t>(width));
 
     size_t radius = k / 2;
 
@@ -35,11 +42,13 @@ std::vector<std::vector<std::uint8_t>> apply_kernel(
             output[y][x] = sum;
         }
     }
-
-    return output;
 }
 
-int main(int argc, char* argv[]) {
+template <typename T> void do_not_optimize(T const& value) {
+    asm volatile("" : : "g"(&value) : "memory");
+}
+
+std::optional<std::chrono::microseconds> apply_blur(int k, ApplyKernelFunction func) {
     int width, height, n;
     unsigned char* data = stbi_load("image.png", &width, &height, &n, 1);
 
@@ -52,24 +61,81 @@ int main(int argc, char* argv[]) {
             image[i / width][i % width] = value;
         }
 
-        int k = 15;
         float weight = 1.0f / (k * k);
 
         std::vector<std::vector<float>> kernel(k, std::vector<float>(k, weight));
 
-        auto out = apply_kernel(image, kernel);
+        std::vector<std::vector<std::uint8_t>> out(height, std::vector<std::uint8_t>(width));
 
-        for (int i = 0; i < height; ++i) {
-            for (int j = 0; j < width; ++j) {
-                unsigned char value = static_cast<unsigned char>(out[i][j]);
-                data[i * width + j] = value;
-            }
+        for (int i = 0; i < kWarmupIterations; ++i) {
+            func(image, kernel, out);
+            do_not_optimize(out);
         }
 
-        stbi_write_png("new.png", width, height, 1, data, width);
+        auto start = std::chrono::steady_clock::now();
+
+        for (int i = 0; i < kIterations; ++i) {
+            func(image, kernel, out);
+            do_not_optimize(out);
+        }
+
+        auto end = std::chrono::steady_clock::now();
+        auto elapsed = end - start;
+
+        // verification
+        std::vector<std::vector<std::uint8_t>> out_v0(height, std::vector<std::uint8_t>(width));
+        apply_kernel_v0(image, kernel, out_v0);
+        if (out_v0 != out) {
+            std::cerr << "image verification failed\n";
+            return std::nullopt;
+        }
 
         stbi_image_free(data);
-    } else {
-        std::cerr << "failed to load image: " << stbi_failure_reason() << "\n";
+
+        return std::chrono::duration_cast<std::chrono::microseconds>(elapsed / kIterations);
     }
+
+    std::cerr << "failed to load image: " << stbi_failure_reason() << "\n";
+    return std::nullopt;
+}
+
+bool verify(
+    std::vector<std::vector<std::uint8_t>>& source, std::vector<std::vector<std::uint8_t>>& x) {
+    if (source.size() != x.size())
+        return false;
+    if (source.size() == 0)
+        return true;
+    if (source[0].size() != x[0].size())
+        return false;
+
+    for (size_t i = 0; i < source.size(); ++i) {
+        for (size_t j = 0; j < source[i].size(); ++j) {
+            // TODO: Consider using a tolerance for floating point error
+            if (source[i][j] != x[i][j])
+                return false;
+        }
+    }
+
+    return true;
+}
+
+int main() {
+    std::cout << "Running benchmark...\n";
+
+    std::vector<ApplyKernelFunction> functions = { apply_kernel_v0 };
+
+    for (size_t i = 0; i < functions.size(); i++) {
+        for (int k = 3; k <= 9; k += 2) {
+            auto maybe_duration = apply_blur(k, functions[i]);
+            if (maybe_duration.has_value()) {
+                auto duration = maybe_duration.value();
+
+                std::cout << k << "x" << k << " kernel: " << duration << '\n';
+            } else {
+                return 1;
+            }
+        }
+    }
+
+    return 0;
 }

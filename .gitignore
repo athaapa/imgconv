@@ -1,1 +1,6 @@
 *.png
+*.trace
+.DS_STORE
+imgconv
+*.dSYM
+.clangd
