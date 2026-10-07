@@ -1,5 +1,5 @@
 CXX      = clang++ 
-CXXFLAGS = -O3 -g -std=c++20
+CXXFLAGS = -O3 -g -std=c++20 -ffast-math
 TARGET   = imgconv
 
 all:
